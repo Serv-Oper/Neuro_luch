@@ -29,7 +29,26 @@ if not os.getenv("TESTING"):
 # ───────────  Telegram & AI ───────────
 BOT_TOKEN         = os.getenv("BOT_TOKEN")
 IO_API_KEY        = os.getenv("IO_API_KEY")
+
 JWT_SECRET_KEY    = os.getenv("JWT_SECRET_KEY")
+
+# ────────── CORS ──────────
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "").strip()
+if allowed_origins_env:
+    ALLOWED_ORIGINS = [
+        origin.strip()
+        for origin in allowed_origins_env.split(",")
+        if origin.strip()
+    ]
+else:
+    ALLOWED_ORIGINS = [
+        "http://localhost:63342",
+        "http://localhost:3000",
+        "http://localhost:8080",
+        "http://localhost:4200",
+        "https://3985-2a09-bac5-48a1-505-00-80-183.ngrok-free.app",
+        "https://jocular-douhua-c28ae0.netlify.app",
+    ]
 
 FREE_DAILY_LIMIT   = int(os.getenv("FREE_DAILY_LIMIT", 5))
 FREE_CHAT_LIMIT    = int(os.getenv("FREE_CHAT_LIMIT", 5))

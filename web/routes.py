@@ -31,6 +31,7 @@ from web.auth import (
 )
 from bot.ai_service import AIService
 from bot.utils import check_and_increment_usage, LimitExceededError
+from db import get_user_message_count
 from db import (
     get_or_create_user,
     get_user_chats,
@@ -40,12 +41,19 @@ from db import (
     delete_chat,
     finish_chat,
     get_today_total_usage,
+    get_last_limited_messages,
+    reset_today_usage,
 )
 from db import SubscriptionStatus
 from db import get_guest_session
 from config import GUEST_TOTAL_LIMIT, FREE_DAILY_LIMIT
 
 from typing import cast
+from typing import List
+from fastapi import Query
+from datetime import datetime
+from db import get_today_usage
+
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login/email")
 router = APIRouter(prefix="/api", tags=["api"])
@@ -98,6 +106,14 @@ class ChatTitleIn(BaseModel):
     chat_id: int
     # автоматически приведёт к str и обрежет лишние пробелы
     title: constr(strip_whitespace=True, min_length=1, max_length=28)
+
+class MessageOut(BaseModel):
+    id: int
+    role: str
+    content: str
+    timestamp: datetime
+    prompt_tokens: int | None
+    completion_tokens: int | None
 
 
 # ─────────── Dependencies ───────────
@@ -186,12 +202,7 @@ async def chat_text(
     data: ChatMsgIn,
     subject: str = Depends(get_current_subject),
 ):
-    # только авторизованные email-пользователи могут работать с чатами
-    if "@" not in subject:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only registered users can chat"
-        )
+    # Получаем пользователя (может быть как зарегистрированный, так и гостевой)
     user = await get_or_create_user(email=subject)
 
     # 1) создать или активировать чат
@@ -201,6 +212,15 @@ async def chat_text(
     else:
         chat_id = data.chat_id
         await set_active_chat(user.id, chat_id)
+
+    # === НОВАЯ ПРОВЕРКА ЛИМИТА: максимум 200 сообщений от USER в одном чате ===
+    max_user_messages = 200
+    cur_count = await get_user_message_count(chat_id)
+    if cur_count >= max_user_messages:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Лимит в {max_user_messages} сообщений от вас в одном чате достигнут. Пожалуйста, создайте новый чат."
+        )
 
     # 2) отправить в AI
     answer = await ai_service.chat_complete(user.id, data.message)
@@ -213,7 +233,8 @@ async def chat_text(
 
 @router.post("/chat/image")
 async def chat_image(
-    chat_id: int,
+    # chat_id можно передавать как строку: "null" или отсутствует — будет создан новый диалог
+    chat_id: str | None = Query(None),
     file: UploadFile = File(...),
     prompt: str | None = Form(None),
     subject: str = Depends(get_current_subject),
@@ -222,31 +243,56 @@ async def chat_image(
     if "@" not in subject:
         raise HTTPException(status_code=403, detail="Only registered users can analyze images")
 
-    # 2) Пользователь и активный чат
+    # 2) Получаем пользователя
     user = await get_or_create_user(email=subject)
-    await set_active_chat(user.id, chat_id)
 
-    # 3) Контроль размера (< 5 MB) и MIME-типа
+    # 2.1) Преобразуем параметр chat_id: "null" или "" считаются отсутствием
+    if chat_id in (None, "", "null"):
+        real_chat_id: int | None = None
+    else:
+        try:
+            real_chat_id = int(chat_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="chat_id должен быть целым числом или null")
+
+    # 2.2) Если chat_id отсутствует, создаем новый чат с моделью vision
+    if real_chat_id is None:
+        chat = await create_chat(user.id, model_key="vision")      # vision – спец-модель для картинок
+        real_chat_id = chat.id
+    else:
+        # Если чат уже существует — принудительно переключаем его модель на vision
+        await set_active_chat(user.id, real_chat_id, model_key="vision")
+
+    # 3) Контроль размера (< 20 MB) и MIME-типа
     if file.content_type.split("/")[0] != "image":
         raise HTTPException(status_code=415, detail="Only image files are allowed")
-    max_size = 5 * 1024 * 1024  # 5 MB
+    max_size = 20 * 1024 * 1024  # 20 MB
     image_bytes = await file.read()
     if len(image_bytes) > max_size:
-        raise HTTPException(status_code=413, detail="Image is too large (limit 5 MB)")
+        raise HTTPException(status_code=413, detail="Image is too large (limit 20 MB)")
 
     # 4) Промпт по умолчанию
     used_prompt = prompt.strip() if prompt and prompt.strip() else (
-        "Пожалуйста, проанализируй это изображение и опиши всё, что на нём видно. "
+        "Пожалуйста, проанализируй это изображение и опиши всё, что на нём видно. Отвечай на русском, если тебя не просят ответить на другом языке."
         "Если на нём есть задачи или тесты — также реши их максимально правильно."
     )
 
-    # 5) Анализ изображения без сохранения файла
-    answer = await ai_service.analyze_image_bytes(user.id, image_bytes, used_prompt)
+    # 5) Анализ изображения (теперь модель гарантированно vision)
+    try:
+        answer = await ai_service.analyze_image_bytes(user.id, image_bytes, used_prompt)
+    except RuntimeError as e:
+        # Здесь ловим случаи, когда внешний API три раза вернул 429/другую ошибку.
+        # Отдаём пользователю явный HTTP 503 (Service Unavailable) с текстом из e.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Не удалось получить ответ от vision-модели: {e}"
+        )
 
     # 6) Лимит запросов
     await _apply_usage_limit(user)
 
-    return {"answer": answer}
+    # 7) Возвращаем и ответ, и id созданного/использованного чата
+    return {"chat_id": real_chat_id, "answer": answer}
 
 @router.get("/chat/active")
 async def api_active_chat(subject: str = Depends(get_current_subject)):
@@ -305,19 +351,44 @@ async def api_title_chat(
 @router.get("/profile")
 async def api_profile(subject: str = Depends(require_email_user)):
     user = await get_or_create_user(email=subject)
-    # guest
+    # 1) Если это гостевой аккаунт
     if user.email is None:
-        gs = await get_guest_session(session_token=subject)  # or by telegram ID?
-        return {"profile": "guest", "used": gs.request_count, "limit": GUEST_TOTAL_LIMIT}
-    # registered
+        gs = await get_guest_session(session_token=subject)
+        return {
+            "profile": "guest",
+            "used": gs.request_count,
+            "limit": GUEST_TOTAL_LIMIT
+        }
+
+    # 2) Зарегистрированный пользователь
     from datetime import date
-    used_total = await get_today_total_usage(int(user.id), date.today())
+    today = date.today()
+
+    # 2.1) Для Free-подписки — возвращаем общий использованный счётчик
+    if user.subscription_status == SubscriptionStatus.FREE:
+        used_total = await get_today_total_usage(int(user.id), today)
+        return {
+            "email": user.email,
+            "status": "Бесплатный",
+            "expires": user.subscription_expires_at,
+            "used_today": used_total,
+            "limit": FREE_DAILY_LIMIT
+        }
+
+    # 2.2) Для Премиум-подписки — возвращаем разбивку по моделям
+    used_fast  = await get_today_usage(int(user.id), today, model_key="fast")
+    used_smart = await get_today_usage(int(user.id), today, model_key="smart")
+    used_vision= await get_today_usage(int(user.id), today, model_key="vision")
+
     return {
         "email": user.email,
-        "status": user.subscription_status,
+        "status": "Премиум",
         "expires": user.subscription_expires_at,
-        "used_today": used_total,
-        "limit": FREE_DAILY_LIMIT if user.subscription_status == SubscriptionStatus.FREE else None,
+        "usage": {
+            "fast":  { "used": used_fast,   "limit": 45 },
+            "smart": { "used": used_smart,  "limit": 15 },
+            "vision":{ "used": used_vision, "limit": 15 }
+        }
     }
 
 @router.post("/chat/model")
@@ -346,3 +417,59 @@ async def change_chat_model(
         "chat_id": data.chat_id,
         "model_key": data.model_key
     }
+
+
+# Получить сообщения чата по chat_id (от старых к новым)
+# Получить сообщения чата по chat_id (от старых к новым, но итоговая отдача уже «перевернутая»)
+@router.get(
+    "/chat/talk/{chat_id}",
+    response_model=List[MessageOut],
+    summary="Получить сообщения чата (максимум по лимитам USER/BOT)",
+)
+async def api_get_chat_messages(
+    chat_id: int,
+    max_user: int = Query(120, ge=0, le=120),
+    max_bot: int = Query(120, ge=0, le=120),
+    subject: str = Depends(get_current_subject),
+):
+    # 1) Доступ только для зарегистрированных пользователей
+    if "@" not in subject:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only registered users can view chat messages",
+        )
+
+    # 2) Проверяем, что пользователь владеет этим chat_id
+    user = await get_or_create_user(email=subject)
+    user_chats = await get_user_chats(user.id)
+    if chat_id not in {c.id for c in user_chats}:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat not found or no permission",
+        )
+
+    # 3) Получаем из БД список сообщений от старых к новым
+    messages = await get_last_limited_messages(
+        chat_id,
+        max_user=max_user,
+        max_bot=max_bot
+    )
+
+    # 4) Переворачиваем список, чтобы фронтендер не делал .reverse()
+    return [
+        {
+            "id": m.id,
+            "role": m.role.value,
+            "content": m.content,
+            "timestamp": m.timestamp,
+            "prompt_tokens": m.prompt_tokens,
+            "completion_tokens": m.completion_tokens,
+        }
+        for m in reversed(messages)
+    ]
+
+@router.post("/test/reset-usage")
+async def api_reset_usage(email: str = Depends(require_email_user)):
+    user = await get_or_create_user(email=email)
+    await reset_today_usage(user.id)
+    return {"detail": "usage reset"}
