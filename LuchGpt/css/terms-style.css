@@ -1,0 +1,112 @@
+body {
+  line-height: 1.7; /* Улучшаем читаемость основного текста */
+  color: #333;
+  height: auto !important;
+  overflow-x: hidden;
+  font-family: "Montserrat", sans-serif;
+}
+
+.terms-page-container {
+  max-width: 900px; /* Ограничиваем ширину контента */
+  margin: 0 auto;
+  padding: 30px 20px;
+  background-color: #fff; /* Белый фон для контентной части */
+  box-shadow: 0 2px 10px rgba(0,0,0,0.05); /* Легкая тень для контейнера */
+  border-radius: 8px; /* Опционально, для скругления углов контейнера */
+  margin-top: 20px; /* Отступ сверху */
+  margin-bottom: 40px; /* Отступ снизу */
+}
+
+.terms-header {
+  text-align: center;
+  margin-bottom: 40px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #eee;
+}
+
+.terms-header h1 {
+  font-size: 36px;
+  font-weight: bold;
+  color: #000;
+  margin-bottom: 5px;
+}
+
+.terms-header h2 {
+  font-size: 28px;
+  font-weight: 600;
+  color: #333;
+}
+
+.terms-content section {
+  margin-bottom: 30px;
+}
+
+.terms-content h3 {
+  font-size: 20px;
+  font-weight: bold; /* Заголовки секций жирные */
+  color: #111;
+  margin-bottom: 15px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid #f0f0f0; /* Легкий разделитель под заголовком секции */
+}
+
+.terms-content p {
+  margin-bottom: 12px;
+  font-size: 16px;
+  color: #444;
+}
+
+.terms-content p strong { /* Номера пунктов и подпунктов жирные */
+  font-weight: bold;
+  color: #000;
+}
+
+.terms-content ul {
+  list-style: disc; /* Стандартные маркеры для списков */
+  margin-left: 20px; /* Отступ для списка */
+  margin-bottom: 15px;
+  padding-left: 15px;
+}
+
+.terms-content li {
+  margin-bottom: 8px;
+  font-size: 16px;
+  color: #444;
+}
+
+/* Адаптивность для страницы условий */
+@media (max-width: 768px) {
+  .terms-page-container {
+    margin-top: 0;
+    margin-bottom: 20px;
+    padding: 20px 15px;
+    border-radius: 0; /* Убираем скругление на мобильных, если контейнер на всю ширину */
+  }
+  .terms-header h1 {
+    font-size: 28px;
+  }
+  .terms-header h2 {
+    font-size: 22px;
+  }
+  .terms-content h3 {
+    font-size: 18px;
+  }
+  .terms-content p, .terms-content li {
+    font-size: 15px;
+  }
+}
+
+@media (max-width: 480px) {
+  .terms-header h1 {
+    font-size: 24px;
+  }
+  .terms-header h2 {
+    font-size: 20px;
+  }
+  .terms-content h3 {
+    font-size: 17px;
+  }
+  .terms-content p, .terms-content li {
+    font-size: 14px;
+  }
+}
